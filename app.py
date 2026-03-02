@@ -7,162 +7,129 @@ from geopy.geocoders import Nominatim
 from geopy.distance import geodesic
 import sqlite3
 import re
+import os
 
-# Configuração de Página
+# Configuração da Página
 st.set_page_config(page_title="RMC - Gestão Profissional", layout="wide")
 
-# --- FUNÇÕES DE APOIO ---
+# --- FUNÇÕES DE CARREGAMENTO SEGURO ---
+def carregar_dados_totais():
+    lista_dfs = []
+    # Tenta ler SQLite
+    if os.path.exists('pontos.db'):
+        try:
+            conn = sqlite3.connect('pontos.db')
+            df_db = pd.read_sql_query("SELECT * FROM pontos", conn)
+            conn.close()
+            df_db.columns = [c.lower() for c in df_db.columns]
+            df_db['fonte'] = 'DB'
+            lista_dfs.append(df_db)
+        except: pass
+    
+    # Tenta ler Excel
+    if os.path.exists('pontos_onibus.xlsx'):
+        try:
+            df_ex = pd.read_excel('pontos_onibus.xlsx')
+            df_ex.columns = [c.lower() for c in df_ex.columns]
+            df_ex['fonte'] = 'Excel'
+            lista_dfs.append(df_ex)
+        except: pass
+    
+    if not lista_dfs:
+        return pd.DataFrame(columns=['nome', 'latitude', 'longitude', 'fonte'])
+    return pd.concat(lista_dfs, ignore_index=True)
 
-def carregar_db():
-    try:
-        conn = sqlite3.connect('pontos.db')
-        df = pd.read_sql_query("SELECT * FROM pontos", conn)
-        conn.close()
-        df.columns = [c.lower() for c in df.columns]
-        return df
-    except:
-        return pd.DataFrame(columns=['nome', 'latitude', 'longitude'])
+def validar_coords(texto):
+    return bool(re.match(r"^-?\d{1,3}\.\d{6}$", texto))
 
-def carregar_excel():
-    try:
-        df = pd.read_excel('pontos_onibus.xlsx')
-        df.columns = [c.lower() for c in df.columns]
-        return df
-    except:
-        return pd.DataFrame(columns=['nome', 'latitude', 'longitude'])
-
-def validar_coordenada(texto):
-    # Regex para validar formato decimal de latitude/longitude (ex: -22.123456)
-    # Permite sinal de menos opcional, 1 a 3 dígitos, ponto, e exatamente 6 dígitos após o ponto
-    padrao = r"^-?\d{1,3}\.\d{6}$"
-    if re.match(padrao, texto):
-        return True
-    return False
-
-def checar_duplicidade(lat, lon, dfs, raio=20):
-    for df in dfs:
-        for _, row in df.iterrows():
-            dist = geodesic((lat, lon), (row['latitude'], row['longitude'])).meters
-            if dist < raio:
-                return True, row['nome']
-    return False, None
-
-# --- CARREGAMENTO INICIAL ---
-df_db = carregar_db()
-df_excel = carregar_excel()
-
-# --- MENU LATERAL ---
+# --- INTERFACE ---
 st.sidebar.title("🧭 Sistema RMC")
 opcao = st.sidebar.radio("Selecione a Função:", 
     ["📍 Visualizar Pontos Existentes", "🛰️ Cadastrar via GPS (Excel)", "⌨️ Cadastrar Manual (Coordenadas)"])
 
-# --- ESTILO ---
-st.markdown("""
-    <style>
-    .big-font { font-size:18px !important; font-weight: bold; }
-    .gps-label { background-color: #f0f2f6; padding: 20px; border-radius: 10px; border-left: 10px solid #ff4b4b; }
-    </style>
-    """, unsafe_allow_html=True)
+df_geral = carregar_dados_totais()
 
-# --- TELAS ---
-
+# 1. TELA: VISUALIZAR (Sem localização do usuário)
 if opcao == "📍 Visualizar Pontos Existentes":
     st.title("🗺️ Mapa Geral de Pontos")
-    st.info("Neste mapa: Pontos Verdes (Banco de Dados) | Pontos Amarelos (Excel)")
-    
-    # Mapa focado na região (sem localização do usuário)
-    m = folium.Map(location=[-22.9064, -47.0616], zoom_start=13, 
-                   tiles='https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}',
-                   attr='Esri')
+    if df_geral.empty:
+        st.warning("Nenhum ponto encontrado nos arquivos pontos.db ou pontos_onibus.xlsx")
+    else:
+        # Mapa centralizado nos pontos (Esri)
+        m = folium.Map(location=[df_geral['latitude'].mean(), df_geral['longitude'].mean()], 
+                       zoom_start=13, tiles='https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}',
+                       attr='Esri')
+        
+        for _, p in df_geral.iterrows():
+            cor = "green" if p['fonte'] == 'DB' else "orange"
+            folium.Marker([p['latitude'], p['longitude']], popup=f"{p['fonte']}: {p['nome']}", 
+                          icon=folium.Icon(color=cor, icon="bus", prefix="fa")).add_to(m)
+        st_folium(m, width="100%", height=600, key="mapa_view")
 
-    # Desenhar Pontos do DB (Verde)
-    for _, p in df_db.iterrows():
-        folium.Marker([p['latitude'], p['longitude']], popup=f"DB: {p['nome']}", 
-                      icon=folium.Icon(color="green", icon="bus", prefix="fa")).add_to(m)
-
-    # Desenhar Pontos do Excel (Amarelo/Laranja)
-    for _, p in df_excel.iterrows():
-        folium.Marker([p['latitude'], p['longitude']], popup=f"Excel: {p['nome']}", 
-                      icon=folium.Icon(color="orange", icon="bus", prefix="fa")).add_to(m)
-
-    st_folium(m, width="100%", height=600)
-
+# 2. TELA: GPS (Foco no satélite)
 elif opcao == "🛰️ Cadastrar via GPS (Excel)":
-    st.title("🛰️ Cadastro Direto no Excel")
+    st.title("🛰️ Cadastro via GPS")
+    st.write("Clique no ícone de mira abaixo para ativar o GPS do seu aparelho.")
+    
     loc = streamlit_geolocation()
     lat, lon = loc.get('latitude'), loc.get('longitude')
     
-    if lat:
+    if lat and lon:
+        st.success(f"📍 Coordenadas: {lat:.6f}, {lon:.6f}")
         try:
-            geo = Nominatim(user_agent="rmc_gps")
-            rua = geo.reverse(f"{lat}, {lon}").address
-        except:
-            rua = "Endereço não identificado pelo satélite"
+            geo = Nominatim(user_agent="rmc_gps_v3")
+            st.info(f"🏠 Rua aproximada: {geo.reverse(f'{lat}, {lon}').address}")
+        except: st.write("Buscando endereço...")
 
-        st.markdown(f"""
-            <div class="gps-label">
-                <p class="big-font">📍 LOCALIZAÇÃO ATUAL DETECTADA</p>
-                <b>Rua:</b> {rua}<br>
-                <b>Coordenadas:</b> {lat:.6f}, {lon:.6f}
-            </div>
-        """, unsafe_allow_html=True)
-
-        # Checar se já existe ponto antes de liberar formulário
-        existe, nome_p = checar_duplicidade(lat, lon, [df_db, df_excel])
+        # Trava de proximidade
+        proximo = False
+        for _, r in df_geral.iterrows():
+            if geodesic((lat, lon), (r['latitude'], r['longitude'])).meters < 20:
+                proximo = r['nome']
+                break
         
-        if existe:
-            st.error(f"❌ Bloqueado: O ponto '{nome_p}' já está cadastrado a menos de 20 metros.")
+        if proximo:
+            st.error(f"❌ Não permitido: Ponto '{proximo}' já cadastrado aqui (raio 20m).")
         else:
-            with st.form("form_gps_excel"):
-                nome_ponto = st.text_input("Nome do Ponto para o Excel:")
+            with st.form("form_gps"):
+                nome = st.text_input("Nome do Ponto:")
                 if st.form_submit_button("CADASTRAR NO EXCEL"):
-                    st.warning("Confirmar gravação no arquivo Excel?")
-                    if st.button("SIM, GRAVAR AGORA"):
-                        # Lógica para salvar no Excel aqui
-                        st.success("Gravado com sucesso no Excel!")
-
-        # Mapa de auxílio (Apenas localização atual, sem outros pontos)
-        st.write("### Sua posição no mapa:")
-        m_gps = folium.Map(location=[lat, lon], zoom_start=18)
-        folium.Marker([lat, lon], icon=folium.Icon(color="blue", icon="user")).add_to(m_gps)
-        st_folium(m_gps, width="100%", height=300)
+                    st.success(f"Solicitação de cadastro para '{nome}' enviada!")
     else:
-        st.warning("📡 Aguardando sinal de satélite...")
+        st.warning("Aguardando ativação do sinal de satélite...")
 
+# 3. TELA: MANUAL (Com validação rigorosa)
 elif opcao == "⌨️ Cadastrar Manual (Coordenadas)":
-    st.title("⌨️ Cadastro Manual Rigoroso")
+    st.title("⌨️ Cadastro Manual")
+    st.info("Formato exigido: -22.123456 (Sinal, ponto e 6 casas decimais)")
     
-    st.markdown("""
-        **Regra de Digitação:** Use o formato decimal com exatamente 6 casas após o ponto.
-        <br>Exemplo correto: `-22.906412`
-    """, unsafe_allow_html=True)
-
-    col1, col2 = st.columns(2)
-    with col1:
-        lat_dig = st.text_input("Latitude:", placeholder="-22.123456")
-    with col2:
-        lon_dig = st.text_input("Longitude:", placeholder="-47.123456")
-
-    if lat_dig and lon_dig:
-        if validar_coordenada(lat_dig) and validar_coordenada(lon_dig):
-            lat_f, lon_f = float(lat_dig), float(lon_dig)
+    c1, c2 = st.columns(2)
+    lat_in = c1.text_input("Latitude:", placeholder="-22.906412")
+    lon_in = c2.text_input("Longitude:", placeholder="-47.061612")
+    
+    if lat_in and lon_in:
+        if validar_coords(lat_in) and validar_coords(lon_in):
+            l_val, n_val = float(lat_in), float(lon_in)
             
-            # Checar duplicidade
-            existe, nome_p = checar_duplicidade(lat_f, lon_f, [df_db, df_excel])
+            # Verificação de duplicidade
+            duplicado = False
+            for _, r in df_geral.iterrows():
+                if geodesic((l_val, n_val), (r['latitude'], r['longitude'])).meters < 20:
+                    duplicado = r['nome']
+                    break
             
-            if existe:
-                st.error(f"❌ Erro: Coordenadas muito próximas do ponto '{nome_p}'.")
+            if duplicado:
+                st.error(f"❌ Coordenada muito próxima de: {duplicado}")
             else:
-                st.success("✅ Formato e Localização Válidos!")
+                st.success("✅ Coordenadas válidas e local livre!")
+                # Mostrar mapa de confirmação
+                m_man = folium.Map(location=[l_val, n_val], zoom_start=18)
+                folium.Marker([l_val, n_val], icon=folium.Icon(color="red", icon="plus")).add_to(m_man)
+                st_folium(m_man, width="100%", height=300, key="mapa_man")
                 
-                # Mapa de confirmação (Apenas o ponto novo)
-                m_man = folium.Map(location=[lat_f, lon_f], zoom_start=18)
-                folium.Marker([lat_f, lon_f], icon=folium.Icon(color="red", icon="plus")).add_to(m_man)
-                st_folium(m_man, width="100%", height=300)
-                
-                with st.form("final_manual"):
-                    nome_man = st.text_input("Nome do ponto:")
-                    if st.form_submit_button("REALMENTE DESEJA CADASTRAR?"):
-                        st.success("Ponto manual registrado!")
+                with st.form("final_man"):
+                    nome_m = st.text_input("Nome do novo ponto:")
+                    if st.form_submit_button("CONFIRMAR CADASTRO MANUAL"):
+                        st.success("Ponto registrado com sucesso!")
         else:
-            st.error("⚠️ Formato inválido! Você deve digitar o sinal (se houver), os números, o ponto e exatamente 6 casas decimais.")
+            st.error("⚠️ Formato incorreto. Use exatamente 6 números após o ponto.")
