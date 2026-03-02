@@ -4,3 +4,4 @@ streamlit-autorefresh
 geopy
 pandas
 folium
+altair
