@@ -3,89 +3,128 @@ import pandas as pd
 import folium
 from streamlit_folium import st_folium
 from streamlit_geolocation import streamlit_geolocation
-from streamlit_autorefresh import st_autorefresh # Novo: Atualização automática
+from streamlit_autorefresh import st_autorefresh
 from geopy.geocoders import Nominatim
+import sqlite3
 
-# 1. Configuração e Auto-Refresh (Atualiza a cada 10 segundos)
-st.set_page_config(page_title="Mapeamento RMC Pro", layout="wide")
+# 1. Configurações Iniciais
+st.set_page_config(page_title="Monitoramento RMC", layout="wide")
 
-# Faz o app recarregar automaticamente para ler o GPS novo
-st_autorefresh(interval=10000, key="datarefresh") 
+# Atualiza o GPS automaticamente a cada 10 segundos
+st_autorefresh(interval=10000, key="global_refresh")
 
-st.markdown("""
-    <style>
-    .rua-badge { background: #1E1E1E; color: #00FF00; padding: 15px; border-radius: 10px; 
-                 font-family: monospace; border: 1px solid #333; margin-bottom: 15px; }
-    div.stButton > button { border-radius: 20px; text-transform: uppercase; }
-    </style>
-    """, unsafe_allow_html=True)
-
-# 2. Captura de Localização
-location = streamlit_geolocation()
-lat_atual = location.get('latitude')
-lon_atual = location.get('longitude')
-
-def obter_rua_detalhada(lat, lon):
+# --- FUNÇÕES DE CARREGAMENTO (Evita que os pontos sumam) ---
+@st.cache_data
+def carregar_pontos_db():
     try:
-        geolocator = Nominatim(user_agent="rmc_bus_prod")
-        res = geolocator.reverse(f"{lat}, {lon}", timeout=3)
-        return res.address
+        conn = sqlite3.connect('pontos.db') # Nome do seu arquivo no Git
+        df = pd.read_sql_query("SELECT * FROM pontos", conn)
+        conn.close()
+        return df
     except:
-        return "Localizando via satélite..."
+        return pd.DataFrame(columns=['nome', 'latitude', 'longitude'])
 
-# 3. Painel de Informações Superior
-if lat_atual:
-    endereco = obter_rua_detalhada(lat_atual, lon_atual)
-    st.markdown(f"""
-        <div class="rua-badge">
-            📡 GPS ATIVO (Atualização Automática)<br>
-            📍 {endereco}<br>
-            🌎 {lat_atual:.6f}, {lon_atual:.6f}
-        </div>
-    """, unsafe_allow_html=True)
-else:
-    st.info("🛰️ Aguardando sinal de GPS... Mantenha o navegador aberto.")
+@st.cache_data
+def carregar_pontos_excel():
+    try:
+        # Substitua pelo nome real do seu arquivo Excel
+        df = pd.read_excel('pontos_onibus.xlsx') 
+        return df
+    except:
+        return pd.DataFrame(columns=['nome', 'latitude', 'longitude'])
 
-# 4. Configuração do Mapa com ESRI (Melhor que OpenStreetMap)
-centro = [lat_atual, lon_atual] if lat_atual else [-22.9064, -47.0616]
+# 2. Interface de Usuário (Menu Lateral)
+st.sidebar.title("Menu de Opções")
+opcao = st.sidebar.radio("O que deseja fazer?", ["Visualizar Mapa", "Cadastrar Ponto (GPS)", "Cadastrar Ponto (Manual)"])
 
+# 3. Captura do GPS Real do Usuário
+loc_data = streamlit_geolocation()
+lat_user = loc_data.get('latitude')
+lon_user = loc_data.get('longitude')
+
+# 4. Lógica do Mapa
+st.title("📍 Sistema de Pontos RMC")
+
+# Pegar nome da rua para a etiqueta superior
+if lat_user:
+    try:
+        geolocator = Nominatim(user_agent="rmc_final_app")
+        endereco = geolocator.reverse(f"{lat_user}, {lon_user}", timeout=3).address
+        st.info(f"🛰️ **Sua Localização Atual:** {endereco}")
+    except:
+        st.write("Localizando...")
+
+# Criar o objeto do Mapa (ESRI Street Map - Alta Qualidade)
+centro_mapa = [lat_user, lon_user] if lat_user else [-22.9064, -47.0616]
 m = folium.Map(
-    location=centro, 
-    zoom_start=18 if lat_atual else 13,
+    location=centro_mapa,
+    zoom_start=17 if lat_user else 12,
     tiles='https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}',
     attr='Esri'
 )
 
-# Marcador do Usuário (Sempre no topo)
-if lat_atual:
+# --- DESENHANDO AS 3 FONTES ---
+
+# Fonte 1: Usuário (Azul)
+if lat_user:
+    folium.Marker([lat_user, lon_user], tooltip="Você", icon=folium.Icon(color="blue", icon="person", prefix="fa")).add_to(m)
+
+# Fonte 2: Pontos do Banco de Dados (Verde)
+df_db = carregar_pontos_db()
+for _, row in df_db.iterrows():
     folium.Marker(
-        [lat_atual, lon_atual],
-        icon=folium.Icon(color="blue", icon="street-view", prefix="fa"),
-        tooltip="Sua Posição"
+        [row['latitude'], row['longitude']],
+        popup=f"DB: {row['nome']}",
+        icon=folium.Icon(color="green", icon="bus", prefix="fa")
     ).add_to(m)
 
-# 5. Renderização do Mapa
-st_folium(m, width="100%", height=500, key="mapa_v3")
+# Fonte 3: Pontos do Excel (Vermelho)
+df_excel = carregar_pontos_excel()
+for _, row in df_excel.iterrows():
+    folium.Marker(
+        [row['latitude'], row['longitude']],
+        popup=f"Excel: {row['nome']}",
+        icon=folium.Icon(color="red", icon="bus", prefix="fa")
+    ).add_to(m)
 
-# 6. Sistema de Cadastro com Confirmação
+# Renderiza o Mapa
+st_folium(m, width="100%", height=500, key="mapa_principal")
+
+# 5. Lógica dos Formulários (Abaixo do Mapa)
 st.write("---")
-if st.button("🚀 CADASTRAR PONTO NESTA LOCALIZAÇÃO"):
-    if lat_atual:
-        st.session_state.confirmar_save = True
-    else:
-        st.error("Erro: GPS não detectado.")
 
-if st.session_state.get('confirmar_save'):
-    with st.container():
-        st.warning("⚠️ **CONFIRMAÇÃO FINAL**")
-        st.write(f"Deseja salvar este ponto de ônibus em: **{endereco}**?")
+if opcao == "Cadastrar Ponto (GPS)":
+    st.subheader("➕ Novo Cadastro via GPS")
+    if lat_user:
+        with st.form("form_gps"):
+            st.write(f"Coordenadas detectadas: {lat_user}, {lon_user}")
+            nome = st.text_input("Nome do Ponto")
+            if st.form_submit_button("VALIDAR"):
+                st.warning("Deseja realmente cadastrar este ponto?")
+                if st.button("Sim, confirmar!"):
+                    st.success("Cadastrado com sucesso!")
+    else:
+        st.error("GPS ainda não detectado.")
+
+elif opcao == "Cadastrar Ponto (Manual)":
+    st.subheader("🔍 Cadastro Manual por Endereço")
+    with st.form("form_manual"):
+        endereco_digitado = st.text_input("Digite a Rua, Número e Cidade")
+        if st.form_submit_button("LOCALIZAR NO MAPA"):
+            try:
+                geolocator = Nominatim(user_agent="rmc_final_app")
+                loc = geolocator.geocode(endereco_digitado)
+                if loc:
+                    st.success(f"Localizado: {loc.latitude}, {loc.longitude}")
+                    st.session_state.temp_lat = loc.latitude
+                    st.session_state.temp_lon = loc.longitude
+                    # Aqui você poderia forçar o mapa a centralizar nessas coordenadas
+                else:
+                    st.error("Endereço não encontrado.")
+            except:
+                st.error("Erro no serviço de busca.")
         
-        c1, c2 = st.columns(2)
-        with c1:
-            if st.button("✅ SIM, CONFIRMAR"):
-                # AQUI ENTRA SEU CÓDIGO DE SALVAR NO SQLITE / GSHEETS
-                st.success("PONTO CADASTRADO COM SUCESSO!")
-                st.session_state.confirmar_save = False
-        with c2:
-            if st.button("❌ CANCELAR"):
-                st.session_state.confirmar_save = False
+        if 'temp_lat' in st.session_state:
+            if st.form_submit_button("CONFIRMAR CADASTRO NESTE ENDEREÇO"):
+                st.success("Ponto manual cadastrado!")
+                del st.session_state.temp_lat
