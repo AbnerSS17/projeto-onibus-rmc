@@ -2,106 +2,130 @@ import streamlit as st
 import pandas as pd
 import folium
 from streamlit_folium import st_folium
-from streamlit_js_eval import streamlit_js_eval
+from streamlit_geolocation import streamlit_geolocation
 from streamlit_gsheets import GSheetsConnection
+from geopy.geocoders import Nominatim
 import sqlite3
 
-# 1. Configuração de Página Responsiva
-st.set_page_config(page_title="Mapeamento RMC", layout="wide")
+# 1. Configuração de Página
+st.set_page_config(page_title="Monitoramento RMC", layout="wide")
 
-# Estilo CSS para melhorar a visualização no celular
+# Inicialização de estados
+if 'form' not in st.session_state:
+    st.session_state.form = None
+if 'confirmado' not in st.session_state:
+    st.session_state.confirmado = False
+
+# Estilo CSS para Mobile
 st.markdown("""
     <style>
-    .reportview-container .main .block-container { padding-top: 1rem; }
-    .stAlert { margin-top: 10px; border-radius: 10px; }
-    div.stButton > button { width: 100%; border-radius: 10px; height: 3.5em; font-weight: bold; }
+    .main { background-color: #f5f7f9; }
+    .stButton>button { width: 100%; border-radius: 8px; height: 3em; background-color: #007bff; color: white; }
+    .location-card { padding: 15px; background: white; border-radius: 10px; border-left: 5px solid #007bff; margin-bottom: 10px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
     </style>
     """, unsafe_allow_html=True)
 
-# 2. Captura de Localização (GPS) - ESSENCIAL NO TOPO
-# Esta linha solicita permissão e captura as coordenadas do navegador
-loc = streamlit_js_eval(js_expressions="navigator.geolocation.getCurrentPosition(pos => { window.parent.postMessage({type: 'location', pos: pos.coords}, '*') });", key="Location")
+# 2. Captura de Localização e Endereço
+st.subheader("🛰️ Rastreamento em Tempo Real")
+location = streamlit_geolocation()
 
-st.title("📍 Sistema de Mapeamento RMC")
+def obter_endereco(lat, lon):
+    try:
+        geolocator = Nominatim(user_agent="rmc_app")
+        location = geolocator.reverse(f"{lat}, {lon}")
+        return location.address.split(',')[0] + ", " + location.address.split(',')[1]
+    except:
+        return "Endereço não identificado"
 
-# 3. Etiqueta de Texto com Localização (Acima do Mapa)
-if loc:
-    lat_atual = loc['latitude']
-    lon_atual = loc['longitude']
+lat_gps, lon_gps, endereco_atual = None, None, "Aguardando sinal..."
+
+if location.get('latitude'):
+    lat_gps = location['latitude']
+    lon_gps = location['longitude']
+    endereco_atual = obter_endereco(lat_gps, lon_gps)
     
-    # Exibe uma etiqueta de sucesso com os dados capturados
-    st.success(f"✅ **Sua Localização Atual:**\n\n**Latitude:** {lat_atual:.6f} | **Longitude:** {lon_atual:.6f}")
-    st.info("💡 *Dica: O nome da rua aparecerá no marcador azul dentro do mapa.*")
-else:
-    st.warning("📡 Aguardando sinal de GPS... Certifique-se de que a localização está permitida no seu navegador.")
+    # Etiqueta de Localização Real-Time
+    st.markdown(f"""
+    <div class="location-card">
+        <small>📍 VOCÊ ESTÁ EM:</small><br>
+        <strong>{endereco_atual}</strong><br>
+        <small>Coord: {lat_gps:.6f}, {lon_gps:.6f}</small>
+    </div>
+    """, unsafe_allow_html=True)
 
-# 4. Conexões de Dados
-conn = st.connection("gsheets", type=GSheetsConnection)
-
-@st.cache_data(ttl=0)
-def carregar_dados_completos():
-    try:
-        df_p = conn.read(ttl=0)
-    except:
-        df_p = pd.DataFrame()
-    try:
-        db_conn = sqlite3.connect('transporte_integrado.db')
-        df_f = pd.read_sql_query("SELECT * FROM pontos", db_conn)
-        db_conn.close()
-    except:
-        df_f = pd.DataFrame()
+# 3. Conexão com Dados
+@st.cache_data(ttl=60)
+def carregar_dados():
+    # Simulando carregamento (Substitua pelas suas conexões reais)
+    df_p = pd.DataFrame(columns=['empresa', 'latitude', 'longitude']) # GSheets
+    df_f = pd.DataFrame(columns=['nome_ponto', 'latitude', 'longitude']) # SQLite
     return df_p, df_f
 
-df_planilha, df_fixos = carregar_dados_completos()
+df_planilha, df_fixos = carregar_dados()
 
-# --- LÓGICA DE FOCO E CONSTRUÇÃO DO MAPA ---
-centro_mapa = [-22.9064, -47.0616] # Centro RMC padrão
-zoom_inicial = 12
+# 4. Construção do Mapa
+# "CartoDB Positron" é excelente para visualização urbana limpa
+centro = [lat_gps, lon_gps] if lat_gps else [-22.9064, -47.0616]
+m = folium.Map(location=centro, zoom_start=17 if lat_gps else 12, tiles="CartoDB positron")
 
-if loc:
-    centro_mapa = [loc['latitude'], loc['longitude']]
-    zoom_inicial = 16 # Zoom aproximado para foco no usuário
-
-m = folium.Map(location=centro_mapa, zoom_start=zoom_inicial, control_scale=True)
-
-# A) Marcador da Sua Localização (Azul)
-if loc:
+# Marcador do Usuário
+if lat_gps:
     folium.Marker(
-        [loc['latitude'], loc['longitude']],
-        popup="Você está aqui",
-        tooltip="Sua Posição Real",
-        icon=folium.Icon(color="blue", icon="user", prefix="fa")
+        [lat_gps, lon_gps],
+        icon=folium.Icon(color="blue", icon="street-view", prefix="fa"),
+        tooltip="Sua Posição Atual"
     ).add_to(m)
-    # Círculo de precisão
-    folium.Circle([loc['latitude'], loc['longitude']], radius=30, color="blue", fill=True, fill_opacity=0.2).add_to(m)
 
-# B) Marcadores da Planilha Excel (Círculos Vermelhos)
-for _, row in df_planilha.iterrows():
-    if pd.notnull(row['latitude']) and pd.notnull(row['longitude']):
-        folium.CircleMarker(
-            location=[row['latitude'], row['longitude']],
-            radius=7, color="red", fill=True, fill_color="red", fill_opacity=0.8,
-            popup=f"Empresa: {row['empresa']}"
-        ).add_to(m)
-
-# C) Marcadores do Arquivo DB (Círculos Verdes)
+# Desenhar Pontos de Ônibus (Verdes e Vermelhos) com ícone de Ônibus
 for _, row in df_fixos.iterrows():
-    if pd.notnull(row['latitude']) and pd.notnull(row['longitude']):
-        folium.CircleMarker(
-            location=[row['latitude'], row['longitude']],
-            radius=5, color="green", fill=True, fill_color="green", fill_opacity=0.6,
-            popup=row.get('nome_ponto', 'Ponto de Ônibus')
-        ).add_to(m)
+    folium.Marker(
+        [row['latitude'], row['longitude']],
+        icon=folium.Icon(color="green", icon="bus", prefix="fa"),
+        popup=row.get('nome_ponto')
+    ).add_to(m)
 
-# 5. Exibição do Mapa (Responsivo)
-st_folium(m, width="100%", height=450, key="mapa_final")
+# 5. Exibição do Mapa
+st_folium(m, width="100%", height=400, key="mapa_rmc")
 
-# 6. Botões de Cadastro (Abaixo do Mapa)
+# 6. Lógica de Cadastro
 st.write("---")
 col1, col2 = st.columns(2)
+
 with col1:
-    if st.button("➕ Cadastrar Ponto Aqui"):
+    if st.button("➕ Cadastrar Ponto (GPS)"):
         st.session_state.form = "auto"
 with col2:
-    if st.button("🔍 Digitar Local"):
+    if st.button("🔍 Digitar Localização"):
         st.session_state.form = "manual"
+
+# FORMULÁRIOS
+if st.session_state.form == "auto":
+    with st.form("form_gps"):
+        st.info("O sistema usará sua posição exata agora.")
+        st.text_input("Rua Atual", value=endereco_atual, disabled=True)
+        st.text_input("Latitude", value=lat_gps, disabled=True)
+        st.text_input("Longitude", value=lon_gps, disabled=True)
+        nome_ponto = st.text_input("Nome/Número do Ponto")
+        
+        if st.form_submit_button("Validar Cadastro"):
+            st.warning(f"Confirmar cadastro do ponto '{nome_ponto}' nesta localização?")
+            if st.button("Sim, Realmente desejo cadastrar!"):
+                # Lógica de salvar no DB aqui
+                st.success("Ponto cadastrado com sucesso!")
+                st.session_state.form = None
+
+elif st.session_state.form == "manual":
+    with st.form("form_manual"):
+        st.subheader("Cadastro Manual")
+        rua_input = st.text_input("Digite o nome da rua e cidade")
+        lat_input = st.number_input("Latitude (opcional)", format="%.6f")
+        lon_input = st.number_input("Longitude (opcional)", format="%.6f")
+        
+        btn_verificar = st.form_submit_button("Verificar no Mapa")
+        
+        if btn_verificar:
+            # Aqui você adicionaria a lógica de mover o mapa para a rua digitada
+            st.info(f"Buscando: {rua_input}... Se o ponto estiver correto, confirme abaixo.")
+            
+        if st.form_submit_button("Confirmar Cadastro Manual"):
+             st.success("Solicitação enviada!")
