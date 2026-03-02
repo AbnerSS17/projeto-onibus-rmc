@@ -1,6 +1,6 @@
 streamlit-folium
 streamlit-geolocation
+streamlit-autorefresh
 geopy
 pandas
 folium
-st-gsheets-connection
