@@ -1,99 +1,88 @@
 import streamlit as st
-from streamlit_js_eval import get_geolocation
+import pandas as pd
 import folium
 from streamlit_folium import st_folium
-import sqlite3
-import pandas as pd
-from datetime import datetime
+from streamlit_js_eval import streamlit_js_eval
 from streamlit_gsheets import GSheetsConnection
+from datetime import datetime
 
-# 1. Configuração da Página
-st.set_page_config(page_title="Cadastro de Pontos RMC", layout="wide")
+# Configuração da página
+st.set_page_config(page_title="Mapeamento RMC", layout="wide")
 
-# Interface Inicial
-st.title("📍 Cadastro de Pontos em Tempo Real")
-st.markdown("---")
+st.title("📍 Cadastro de Pontos em Tempo Real - RMC")
 
-# 2. Solicitação de GPS (Trava de Segurança)
-loc = get_geolocation()
+# 1. Conexão com o Google Sheets (Configurado nos Secrets)
+conn = st.connection("gsheets", type=GSheetsConnection)
 
-if not loc:
-    st.warning("🛰️ Aguardando permissão de GPS... Por favor, autorize a localização no seu navegador para liberar o mapa.")
-    st.stop()
+# 2. Função para ler dados da planilha (ttl=0 para tempo real)
+def buscar_dados():
+    return conn.read(ttl=0)
 
-# Coordenadas capturadas
-lat_atual = loc['coords']['latitude']
-lon_atual = loc['coords']['longitude']
+# 3. Captura de Localização via GPS do Navegador
+loc = streamlit_js_eval(js_expressions="navigator.geolocation.getCurrentPosition(pos => { window.parent.postMessage({type: 'location', pos: pos.coords}, '*') });", key="Location")
 
-st.success(f"✅ Localização capturada: {lat_atual:.6f}, {lon_atual:.6f}")
-
-# 3. Mapa com Pontos Existentes (Lendo do .db)
-def carregar_mapa():
-    m = folium.Map(location=[lat_atual, lon_atual], zoom_start=17)
+if loc:
+    lat = loc['latitude']
+    lon = loc['longitude']
+    st.success(f"Localização capturada: {lat}, {lon}")
     
-    # Marcador do Usuário (Azul)
-    folium.Marker([lat_atual, lon_atual], tooltip="Você está aqui", icon=folium.Icon(color='blue', icon='user', prefix='fa')).add_to(m)
+    # --- MAPA DE VISUALIZAÇÃO ---
+    st.subheader("Mapa de Pontos Cadastrados")
     
-    # Tenta ler pontos antigos do arquivo .db
+    # Criar o mapa centralizado na posição atual
+    m = folium.Map(location=[lat, lon], zoom_start=15)
+    
+    # Adicionar marcador da posição atual (Azul)
+    folium.Marker([lat, lon], tooltip="Você está aqui", icon=folium.Icon(color="blue")).add_to(m)
+    
+    # Ler pontos já cadastrados na planilha e adicionar ao mapa (Vermelhos)
     try:
-        conn = sqlite3.connect("transporte_integrado.db")
-        query = "SELECT nome, latitude, longitude, categoria FROM pontos"
-        df_db = pd.read_sql(query, conn)
-        conn.close()
-        
-        for _, p in df_db.iterrows():
-            folium.Marker(
-                [p['latitude'], p['longitude']],
-                popup=f"{p['nome']} ({p['categoria']})",
-                icon=folium.Icon(color='green', icon='bus', prefix='fa')
-            ).add_to(m)
-    except:
-        st.info("ℹ️ Nenhum ponto prévio carregado do banco .db local.")
-        
-    return m
+        df_pontos = buscar_dados()
+        for i, row in df_pontos.iterrows():
+            # Verifica se há coordenadas válidas antes de criar o marcador
+            if pd.notnull(row['latitude']) and pd.notnull(row['longitude']):
+                folium.Marker(
+                    [row['latitude'], row['longitude']],
+                    popup=f"<b>Empresa:</b> {row['empresa']}<br><b>Obs:</b> {row['obs']}",
+                    tooltip=f"{row['categoria']} - {row['data_hora']}",
+                    icon=folium.Icon(color="red", icon="info-sign")
+                ).add_to(m)
+    except Exception as e:
+        st.error(f"Erro ao carregar pontos existentes: {e}")
 
-st_folium(carregar_mapa(), width="100%", height=400)
+    # Exibir o mapa
+    st_folium(m, width=800, height=450)
 
-# 4. Formulário de Cadastro (Salvando no Google Sheets)
-st.subheader("📝 Novo Cadastro")
-
-# Conexão com o Google Sheets (Configurada nos Secrets)
-conn_gsheets = st.connection("gsheets", type=GSheetsConnection)
-
-with st.form("meu_formulario"):
-    categoria = st.selectbox("Categoria do Ponto", ["Municipal", "Híbrido"])
-    empresa = st.text_input("Empresa (ex: SOU, EMTU, Fênix)")
-    observacao = st.text_area("Observações/Linhas")
+    # --- FORMULÁRIO DE CADASTRO ---
+    st.divider()
+    st.subheader("📝 Novo Cadastro")
     
-    botao_enviar = st.form_submit_button("Confirmar e Salvar")
-
-    if botao_enviar:
-        # Criar linha para a planilha
-        nova_linha = pd.DataFrame([{
-            "data_hora": datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
-            "latitude": lat_atual,
-            "longitude": lon_atual,
-            "categoria": categoria,
-            "empresa": empresa,
-            "obs": observacao
-        }])
+    with st.form("form_ponto", clear_on_submit=True):
+        categoria = st.selectbox("Categoria do Ponto", ["Municipal", "Intermunicipal", "Híbrido", "Outro"])
+        empresa = st.text_input("Nome da Empresa")
+        obs = st.text_area("Observações")
         
-        try:
-            # Lê os dados que já estão na planilha "db_pontos"
-            dados_antigos = conn_gsheets.read()
-            # Junta com o novo ponto
-            dados_finais = pd.concat([dados_antigos, nova_linha], ignore_index=True)
-            # Atualiza a planilha no Google Drive
-            conn_gsheets.update(data=dados_finais)
+        submit = st.form_submit_button("Confirmar e Salvar na Planilha")
+        
+        if submit:
+            # Criar novo registro
+            novo_ponto = pd.DataFrame([{
+                "data_hora": datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
+                "latitude": lat,
+                "longitude": lon,
+                "categoria": categoria,
+                "empresa": empresa,
+                "obs": obs
+            }])
+            
+            # Atualizar a planilha (lendo os dados atuais e concatenando)
+            df_atualizado = pd.concat([df_pontos, novo_ponto], ignore_index=True)
+            conn.update(data=df_atualizado)
             
             st.balloons()
-            st.success("✅ Ponto registrado com sucesso na planilha!")
-            
-            # Botão extra para avisar no WhatsApp
-            msg_whats = f"Novo ponto cadastrado! Lat: {lat_atual}, Lon: {lon_atual}. Empresa: {empresa}"
-            link_wpp = f"https://wa.me/5519988922364?text={msg_whats}"
-            st.markdown(f"📲 [Clique aqui para me avisar no WhatsApp]({link_wpp})")
-            
-        except Exception as e:
-            st.error(f"❌ Erro ao salvar na planilha: {e}")
-            st.info("Dica: Verifique se você configurou os Secrets no Streamlit e compartilhou a planilha com o robô.")
+            st.success("Ponto registrado com sucesso na planilha!")
+            st.info("Atualize a página para ver o novo pino no mapa.")
+
+else:
+    st.warning("Aguardando permissão de GPS para carregar o mapa...")
+    st.info("Se o GPS não carregar, verifique se o site tem permissão de localização no seu navegador.")
