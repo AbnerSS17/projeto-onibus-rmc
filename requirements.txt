@@ -1,6 +1,6 @@
-streamlit
+streamlit-folium
+streamlit-geolocation
+geopy
 pandas
 folium
-streamlit-folium
-streamlit-js-eval
 st-gsheets-connection
