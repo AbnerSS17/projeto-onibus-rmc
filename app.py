@@ -5,84 +5,126 @@ from streamlit_folium import st_folium
 from streamlit_js_eval import streamlit_js_eval
 from streamlit_gsheets import GSheetsConnection
 from datetime import datetime
+import re
 
 # Configuração da página
 st.set_page_config(page_title="Mapeamento RMC", layout="wide")
 
-st.title("📍 Cadastro de Pontos em Tempo Real - RMC")
+# Inicialização de estados para controlar os formulários
+if 'form_aberto' not in st.session_state:
+    st.session_state.form_aberto = None  # Pode ser 'automatico', 'manual' ou None
 
-# 1. Conexão com o Google Sheets (Configurado nos Secrets)
-conn = st.connection("gsheets", type=GSheetsConnection)
+def fechar_formularios():
+    st.session_state.form_aberto = None
 
-# 2. Função para ler dados da planilha (ttl=0 para tempo real)
-def buscar_dados():
-    return conn.read(ttl=0)
-
-# 3. Captura de Localização via GPS do Navegador
-loc = streamlit_js_eval(js_expressions="navigator.geolocation.getCurrentPosition(pos => { window.parent.postMessage({type: 'location', pos: pos.coords}, '*') });", key="Location")
-
-if loc:
-    lat = loc['latitude']
-    lon = loc['longitude']
-    st.success(f"Localização capturada: {lat}, {lon}")
-    
-    # --- MAPA DE VISUALIZAÇÃO ---
-    st.subheader("Mapa de Pontos Cadastrados")
-    
-    # Criar o mapa centralizado na posição atual
-    m = folium.Map(location=[lat, lon], zoom_start=15)
-    
-    # Adicionar marcador da posição atual (Azul)
-    folium.Marker([lat, lon], tooltip="Você está aqui", icon=folium.Icon(color="blue")).add_to(m)
-    
-    # Ler pontos já cadastrados na planilha e adicionar ao mapa (Vermelhos)
+# Função para validar coordenadas (Regex)
+def validar_coordenadas(lat, lon):
     try:
-        df_pontos = buscar_dados()
-        for i, row in df_pontos.iterrows():
-            # Verifica se há coordenadas válidas antes de criar o marcador
-            if pd.notnull(row['latitude']) and pd.notnull(row['longitude']):
-                folium.Marker(
-                    [row['latitude'], row['longitude']],
-                    popup=f"<b>Empresa:</b> {row['empresa']}<br><b>Obs:</b> {row['obs']}",
-                    tooltip=f"{row['categoria']} - {row['data_hora']}",
-                    icon=folium.Icon(color="red", icon="info-sign")
-                ).add_to(m)
-    except Exception as e:
-        st.error(f"Erro ao carregar pontos existentes: {e}")
+        l_val = float(lat)
+        n_val = float(lon)
+        # Verifica se estão dentro de faixas globais reais
+        if -90 <= l_val <= 90 and -180 <= n_val <= 180:
+            return True
+        return False
+    except:
+        return False
 
-    # Exibir o mapa
-    st_folium(m, width=800, height=450)
+st.title("📍 Sistema de Mapeamento RMC")
 
-    # --- FORMULÁRIO DE CADASTRO ---
-    st.divider()
-    st.subheader("📝 Novo Cadastro")
-    
-    with st.form("form_ponto", clear_on_submit=True):
-        categoria = st.selectbox("Categoria do Ponto", ["Municipal", "Intermunicipal", "Híbrido", "Outro"])
-        empresa = st.text_input("Nome da Empresa")
-        obs = st.text_area("Observações")
-        
-        submit = st.form_submit_button("Confirmar e Salvar na Planilha")
-        
-        if submit:
-            # Criar novo registro
-            novo_ponto = pd.DataFrame([{
-                "data_hora": datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
-                "latitude": lat,
-                "longitude": lon,
-                "categoria": categoria,
-                "empresa": empresa,
-                "obs": obs
-            }])
+# Conexão GSheets
+conn = st.connection("gsheets", type=GSheetsConnection)
+df_existente = conn.read(ttl=0)
+
+# --- CAPTURA DE LOCALIZAÇÃO AUTOMÁTICA ---
+loc_auto = streamlit_js_eval(js_expressions="navigator.geolocation.getCurrentPosition(pos => { window.parent.postMessage({type: 'location', pos: pos.coords}, '*') });", key="Location")
+
+# --- BOTÕES DE ESCOLHA ---
+col1, col2, col3 = st.columns([1, 1, 1])
+with col1:
+    if st.button("➕ Adicionar ponto na minha localidade"):
+        st.session_state.form_aberto = 'automatico'
+with col2:
+    if st.button("🔍 Adicionar ponto em outro local"):
+        st.session_state.form_aberto = 'manual'
+with col3:
+    if st.button("❌ Cancelar / Fechar"):
+        fechar_formularios()
+
+# --- ÁREA DO MAPA ---
+st.subheader("Visualização em Tempo Real")
+centro_mapa = [-22.9064, -47.0616] # Centro RMC padrão
+zoom = 12
+
+# Se GPS ativo, foca no usuário
+if loc_auto and st.session_state.form_aberto == 'automatico':
+    centro_mapa = [loc_auto['latitude'], loc_auto['longitude']]
+    zoom = 16
+
+m = folium.Map(location=centro_mapa, zoom_start=zoom)
+
+# Plotar pontos já existentes da planilha
+for i, row in df_existente.iterrows():
+    if pd.notnull(row['latitude']):
+        folium.Marker(
+            [row['latitude'], row['longitude']],
+            popup=f"Empresa: {row['empresa']}",
+            icon=folium.Icon(color="red")
+        ).add_to(m)
+
+# Marcador temporário para inserção manual
+lat_manual, lon_manual = None, None
+if st.session_state.form_aberto == 'manual':
+    st.info("Digite as coordenadas abaixo para visualizar o ponto de interrogação no mapa.")
+
+# Exibir Mapa
+st_folium(m, width=800, height=450, key="mapa_principal")
+
+# --- FORMULÁRIO 1: AUTOMÁTICO ---
+if st.session_state.form_aberto == 'automatico':
+    if not loc_auto:
+        st.warning("Aguardando sinal do GPS...")
+    else:
+        with st.form("form_auto"):
+            st.write("### Cadastro Automático (GPS)")
+            st.write(f"Sua posição: `{loc_auto['latitude']}, {loc_auto['longitude']}`")
+            empresa = st.text_input("Nome da Empresa")
+            cat = st.selectbox("Categoria", ["Municipal", "Intermunicipal", "Outro"])
+            obs = st.text_area("Observação")
             
-            # Atualizar a planilha (lendo os dados atuais e concatenando)
-            df_atualizado = pd.concat([df_pontos, novo_ponto], ignore_index=True)
-            conn.update(data=df_atualizado)
-            
-            st.balloons()
-            st.success("Ponto registrado com sucesso na planilha!")
-            st.info("Atualize a página para ver o novo pino no mapa.")
+            if st.form_submit_button("Confirmar Cadastro"):
+                novo = pd.DataFrame([{"data_hora": datetime.now().strftime("%d/%m/%Y %H:%M:%S"), "latitude": loc_auto['latitude'], "longitude": loc_auto['longitude'], "categoria": cat, "empresa": empresa, "obs": obs}])
+                conn.update(data=pd.concat([df_existente, novo], ignore_index=True))
+                st.success("Cadastrado!")
+                fechar_formularios()
+                st.rerun()
 
-else:
-    st.warning("Aguardando permissão de GPS para carregar o mapa...")
-    st.info("Se o GPS não carregar, verifique se o site tem permissão de localização no seu navegador.")
+# --- FORMULÁRIO 2: MANUAL ---
+if st.session_state.form_aberto == 'manual':
+    with st.container():
+        st.write("### Cadastro por Endereço/Coordenadas")
+        rua_input = st.text_input("Nome da Rua")
+        lat_input = st.text_input("Latitude (Ex: -22.915)")
+        lon_input = st.text_input("Longitude (Ex: -47.256)")
+        
+        # Validação em tempo real para mostrar no mapa
+        if lat_input and lon_input:
+            if validar_coordenadas(lat_input, lon_input):
+                st.success("Coordenada Válida! O ponto '?' apareceria aqui.")
+                # Nota: Para atualizar o mapa com o '?' instantaneamente, 
+                # seria necessário um re-processamento do componente folium.
+            else:
+                st.error("Coordenadas Inválidas. Use o formato decimal (ex: -22.123).")
+
+        with st.form("form_manual"):
+            empresa_m = st.text_input("Nome da Empresa")
+            confirmacao = st.checkbox("Você confirma que este ponto realmente existe no local informado?")
+            
+            if st.form_submit_button("Finalizar Cadastro"):
+                if validar_coordenadas(lat_input, lon_input) and confirmacao:
+                    novo = pd.DataFrame([{"data_hora": datetime.now().strftime("%d/%m/%Y %H:%M:%S"), "latitude": float(lat_input), "longitude": float(lon_input), "categoria": "Manual", "empresa": empresa_m, "obs": rua_input}])
+                    conn.update(data=pd.concat([df_existente, novo], ignore_index=True))
+                    st.balloons()
+                    fechar_formularios()
+                    st.rerun()
+                else:
+                    st.error("Verifique as coordenadas e marque a confirmação de existência.")
